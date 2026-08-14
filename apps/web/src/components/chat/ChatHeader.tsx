@@ -7,7 +7,7 @@ import {
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { memo } from "react";
-import { PlayIcon } from "lucide-react";
+import { PlayIcon, FilesIcon } from "lucide-react";
 import GitActionsControl from "../GitActionsControl";
 import { type DraftId } from "~/composerDraftStore";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -22,6 +22,7 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { cn } from "~/lib/utils";
 import { projectTitleColor } from "~/projectTitleColor";
 import { Button } from "../ui/button";
+import { fileViewerUrlForProject } from "../../fileViewerUrl";
 
 const ROBLOX_PLACE_IDS: Readonly<Record<string, string>> = {
   carball: "86507879847439",
@@ -117,6 +118,7 @@ export const ChatHeader = memo(function ChatHeader({
   const robloxPlayUrl = robloxPlaceId
     ? `https://www.roblox.com/games/start?placeId=${robloxPlaceId}`
     : null;
+  const fileViewerUrl = fileViewerUrlForProject(activeProjectName, activeProjectCwd);
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
@@ -217,6 +219,32 @@ export const ChatHeader = memo(function ChatHeader({
             </TooltipTrigger>
             <TooltipPopup side="top">Open this place in Roblox</TooltipPopup>
           </Tooltip>
+        )}
+        {fileViewerUrl && (
+          <div className="max-md:portrait:hidden">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    render={
+                      <a
+                        href={fileViewerUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Open file viewer for ${activeProjectName ?? "project"}`}
+                      />
+                    }
+                  />
+                }
+              >
+                <FilesIcon className="size-3.5" />
+                <span className="hidden @3xl/header-actions:inline">Files</span>
+              </TooltipTrigger>
+              <TooltipPopup side="top">Open the project file viewer</TooltipPopup>
+            </Tooltip>
+          </div>
         )}
         {showOpenInPicker && (
           <OpenInPicker

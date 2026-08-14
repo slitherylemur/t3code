@@ -1,4 +1,5 @@
 import { projectTitleColor } from "../projectTitleColor";
+import { fileViewerUrlForProject } from "../fileViewerUrl";
 import { autoAnimate } from "@formkit/auto-animate";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -24,6 +25,7 @@ import {
   CircleDashedIcon,
   ClockIcon,
   CopyIcon,
+  FilesIcon,
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
@@ -2510,6 +2512,10 @@ export default function SidebarV2() {
                       </MenuRadioItem>
                       {projectGroups.map((project) => {
                         const scopeKey = project.projectKey;
+                        const fileViewerUrl = fileViewerUrlForProject(
+                          project.displayName,
+                          project.workspaceRoot,
+                        );
                         return (
                           <MenuRadioItem
                             key={scopeKey}
@@ -2528,6 +2534,20 @@ export default function SidebarV2() {
                             >
                               {project.displayName}
                             </span>
+                            {fileViewerUrl && (
+                              <a
+                                href={fileViewerUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                aria-label={`Open file viewer for ${project.displayName}`}
+                                title={`Open file viewer for ${project.displayName}`}
+                                className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground/55 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring max-md:portrait:hidden"
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <FilesIcon className="size-3.5" />
+                              </a>
+                            )}
                             <button
                               type="button"
                               aria-label={`Project actions for ${project.displayName}`}

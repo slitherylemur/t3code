@@ -1,10 +1,12 @@
 import { projectTitleColor } from "../projectTitleColor";
+import { fileViewerUrlForProject } from "../fileViewerUrl";
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
   CloudIcon,
   ContainerIcon,
+  FilesIcon,
   FolderPlusIcon,
   Globe2Icon,
   LoaderIcon,
@@ -2215,6 +2217,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
+  const fileViewerUrl = fileViewerUrlForProject(project.displayName, project.workspaceRoot);
+
   return (
     <>
       <div className="group/project-header relative">
@@ -2301,6 +2305,27 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 ? `Local sandbox: ${project.remoteEnvironmentLabels.join(", ")}`
                 : `Remote environment: ${project.remoteEnvironmentLabels.join(", ")}`}
             </TooltipPopup>
+          </Tooltip>
+        )}
+        {fileViewerUrl && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className="pointer-events-none absolute top-[calc(50%+1px)] right-7 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-md:portrait:hidden max-sm:right-12 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
+                  <a
+                    href={fileViewerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`Open file viewer for ${project.displayName}`}
+                    className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <FilesIcon className="size-3.5" />
+                  </a>
+                </div>
+              }
+            />
+            <TooltipPopup side="top">Open file viewer</TooltipPopup>
           </Tooltip>
         )}
         <Tooltip>

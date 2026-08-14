@@ -25,21 +25,25 @@ export interface ComposerMicButtonProps {
   readonly disabled?: boolean;
 }
 
-/** Uses server transcription when advertised and browser dictation for stock servers. */
+/** Uses server transcription when advertised, browser dictation for stock servers, and the hosting site's same-origin transcription proxy when the browser lacks SpeechRecognition (Firefox). */
 export function ComposerMicButton(props: ComposerMicButtonProps) {
   const focusTargetRef = useRef<HTMLElement | null>(null);
   const wasBrowserListeningRef = useRef(false);
   const disabled = props.disabled ?? false;
   const serverSupported = readEnvironmentSupportsTranscription(props.environmentId);
   const httpBaseUrl = useEnvironmentHttpBaseUrl(props.environmentId);
-  setTranscriptionBaseUrl(httpBaseUrl);
   const voice = useVoiceRecording({ onInsertTranscript: props.onInsertTranscript, disabled });
   const browserSpeech = useBrowserSpeechRecognition({
     onInsertTranscript: props.onInsertTranscript,
     ...(props.onRestoreComposerFocus ? { onSessionEnd: props.onRestoreComposerFocus } : {}),
     disabled,
   });
-  const useServerRecorder = serverSupported && voice.isSupported;
+  // Prefer the paired environment's transcription proxy when it advertises
+  // one. Browsers without SpeechRecognition (Firefox) fall back to recording
+  // with MediaRecorder and transcribing via the same-origin proxy on the
+  // hosting site (empty base URL = page origin).
+  const useServerRecorder = (serverSupported || !browserSpeech.isSupported) && voice.isSupported;
+  setTranscriptionBaseUrl(serverSupported ? httpBaseUrl : "");
 
   const preserveComposerFocus = (event: PointerEvent) => {
     const activeElement = document.activeElement;
@@ -68,12 +72,12 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
             type: "error",
             title: "Voice input unavailable",
             description:
-              "This browser does not provide speech recognition. Open LateShift Cloud in Chrome or Edge to use dictation.",
+              "This browser supports neither speech recognition nor audio recording, so voice input is unavailable.",
           })
         }
         disabled={disabled}
         aria-label="Voice input unavailable in this browser"
-        title="Voice input requires Chrome or Edge"
+        title="Voice input is not supported in this browser"
         data-chat-composer-voice="unsupported"
       >
         <MicIcon className="size-4" />

@@ -10,6 +10,7 @@ import {
   formatAgo,
   meterSeverity,
   planLabel,
+  providerHeading,
 } from "./usageSurface.logic";
 
 type UsageFetchState = "loading" | "error" | "loaded";
@@ -84,10 +85,7 @@ export function UsageSurface() {
         setUsageState({
           state: "error",
           data: null,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Couldn't load usage data.",
+          error: error instanceof Error ? error.message : "Couldn't load usage data.",
           lastFetch: Date.now(),
         });
       }
@@ -144,16 +142,9 @@ export function UsageSurface() {
       <ScrollArea className="h-full">
         <div className="flex flex-col items-center justify-center p-4">
           <div className="text-center">
-            <p className="text-xs text-muted-foreground">
-              {usageState.error}
-            </p>
+            <p className="text-xs text-muted-foreground">{usageState.error}</p>
             {usageState.error === "Couldn't load usage data." && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleRefresh}
-                className="mt-3"
-              >
+              <Button variant="ghost" size="sm" onClick={handleRefresh} className="mt-3">
                 <RotateCcw className="size-3.5" />
                 Retry
               </Button>
@@ -190,12 +181,7 @@ export function UsageSurface() {
           <h2 className="text-sm font-medium text-foreground">Usage</h2>
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">updated {timeStr}</span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleRefresh}
-              aria-label="Refresh usage"
-            >
+            <Button variant="ghost" size="sm" onClick={handleRefresh} aria-label="Refresh usage">
               <RotateCcw className="size-3.5" />
             </Button>
           </div>
@@ -203,37 +189,27 @@ export function UsageSurface() {
 
         {/* Claude Provider */}
         {data.providers.claude && (
-          <ProviderCard
-            name="Claude"
-            provider={data.providers.claude}
-            now={now}
-          />
+          <ProviderCard name="Claude" provider={data.providers.claude} now={now} />
         )}
 
         {/* OpenAI Provider */}
         {data.providers.openai && (
-          <ProviderCard
-            name="ChatGPT / Codex"
-            provider={data.providers.openai}
-            now={now}
-          />
+          <ProviderCard name="ChatGPT / Codex" provider={data.providers.openai} now={now} />
         )}
       </div>
     </ScrollArea>
   );
 }
 
-function ProviderCard(props: {
-  name: string;
-  provider: UsageProvider;
-  now: number;
-}) {
+function ProviderCard(props: { name: string; provider: UsageProvider; now: number }) {
   const { name, provider, now } = props;
 
   return (
     <div className="rounded-lg border border-border p-3">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium text-foreground">{name}</h3>
+        <h3 className="text-sm font-medium text-foreground">
+          {providerHeading(name, provider.price)}
+        </h3>
         {provider.plan || provider.tier ? (
           <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
             {planLabel(name === "Claude" ? "claude" : "openai", provider.plan, provider.tier)}
@@ -284,11 +260,7 @@ function LimitRow(props: { limit: UsageLimit; now: number }) {
       </div>
 
       {/* Meter */}
-      <div
-        className={cn(
-          "h-1.5 w-full rounded-full bg-muted overflow-hidden",
-        )}
-      >
+      <div className={cn("h-1.5 w-full rounded-full bg-muted overflow-hidden")}>
         <div
           className={cn(
             "h-full rounded-full transition-all",

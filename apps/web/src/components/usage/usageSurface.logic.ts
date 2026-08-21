@@ -18,6 +18,7 @@ export interface UsageProvider {
   error?: string;
   plan?: string | null;
   tier?: string | null;
+  price?: string | null;
   capturedAt?: string | null;
   stale?: boolean;
   limits?: UsageLimit[];
@@ -29,6 +30,10 @@ export interface UsageResponse {
     claude?: UsageProvider;
     openai?: UsageProvider;
   };
+}
+
+export function providerHeading(name: string, price?: string | null): string {
+  return price ? `${name} (${price})` : name;
 }
 
 export function usageEndpointPath(baseUrl: string | undefined): string {

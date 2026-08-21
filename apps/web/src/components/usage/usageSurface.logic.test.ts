@@ -5,6 +5,7 @@ import {
   formatAgo,
   meterSeverity,
   planLabel,
+  providerHeading,
 } from "./usageSurface.logic";
 
 describe("usageSurface.logic", () => {
@@ -186,6 +187,18 @@ describe("usageSurface.logic", () => {
 
     it("returns 'Unknown plan' for openai with no plan", () => {
       expect(planLabel("openai")).toBe("Unknown plan");
+    });
+  });
+
+  describe("providerHeading", () => {
+    it("shows a provider's subscription price in brackets", () => {
+      expect(providerHeading("Claude", "$200/mo")).toBe("Claude ($200/mo)");
+      expect(providerHeading("ChatGPT / Codex", "$100/mo")).toBe("ChatGPT / Codex ($100/mo)");
+    });
+
+    it("keeps the provider name unchanged when no price is available", () => {
+      expect(providerHeading("Claude", null)).toBe("Claude");
+      expect(providerHeading("ChatGPT / Codex")).toBe("ChatGPT / Codex");
     });
   });
 });

@@ -16,9 +16,9 @@ export const HOSTED_APP_CHANNEL =
   hostedAppChannel === "latest" || hostedAppChannel === "nightly" ? hostedAppChannel : null;
 export const HOSTED_APP_CHANNEL_LABEL =
   HOSTED_APP_CHANNEL === "nightly" ? "Nightly" : HOSTED_APP_CHANNEL === "latest" ? "Latest" : null;
-// LateShift Games branding for the self-hosted web client. The desktop app
+// Self-hosted web client branding. The desktop app
 // injects its own branding, so that path is deliberately left untouched.
-export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "LateShift Code";
+export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "Code";
 export const APP_STAGE_LABEL =
   injectedDesktopAppBranding?.stageLabel ??
   HOSTED_APP_CHANNEL_LABEL ??

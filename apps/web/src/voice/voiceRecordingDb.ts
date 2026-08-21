@@ -115,17 +115,14 @@ export function createIndexedDbRecordingPersistence(): RecordingPersistence {
       return result ?? null;
     },
 
-    async getPendingRecording(): Promise<PersistedRecordingMeta | null> {
+    async getPendingRecordings(): Promise<PersistedRecordingMeta[]> {
       const database = await withDatabase();
       const transaction = database.transaction(RECORDINGS_STORE, "readonly");
       const all = (await promisifyRequest(
         transaction.objectStore(RECORDINGS_STORE).getAll(),
       )) as PersistedRecordingMeta[];
-      if (all.length === 0) {
-        return null;
-      }
-      // Only unfinished recordings are ever persisted; pick the most recent.
-      return all.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+      // Return all unfinished recordings sorted by createdAt ascending.
+      return all.sort((a, b) => a.createdAt - b.createdAt);
     },
 
     async loadAudioBlob(id: string): Promise<Blob | null> {

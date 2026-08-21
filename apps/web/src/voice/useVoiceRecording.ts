@@ -5,9 +5,10 @@ import { isIndexedDbAvailable } from "./voiceRecordingDb";
 import { setVoiceRecordingHandlers, voiceRecordingController } from "./voiceRecordingSingleton";
 import type { VoiceRecordingSnapshot } from "./voiceRecordingTypes";
 
-// Hard cap so a forgotten recording cannot grow unbounded (also well under the
-// server's 25 MB payload ceiling for typical Opus bitrates).
-const MAX_RECORDING_MS = 10 * 60 * 1000;
+// Hard cap per segment so a forgotten recording cannot grow unbounded; well
+// under the server's 25 MB payload ceiling for typical Opus bitrates.
+// Recording continues across segments via automatic rollover.
+const MAX_SEGMENT_MS = 10 * 60 * 1000;
 
 // Compressed formats the OpenAI transcription API accepts, in preference order.
 const PREFERRED_MIME_TYPES = [
@@ -52,8 +53,10 @@ export function useVoiceRecording(options: {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const startedAtRef = useRef(0);
+  const segmentStartedAtRef = useRef(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const maxTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rolloverRequestedRef = useRef(false);
 
   useEffect(() => {
     setVoiceRecordingHandlers({
@@ -96,88 +99,134 @@ export function useVoiceRecording(options: {
     }
   }, [clearTimers]);
 
-  const start = useCallback(async () => {
-    if (options.disabled === true || recorderRef.current !== null) {
-      return;
-    }
-    if (typeof navigator === "undefined" || navigator.mediaDevices?.getUserMedia === undefined) {
-      toastManager.add({
-        type: "error",
-        title: "Microphone unavailable",
-        description: "This browser does not support audio recording.",
-      });
-      return;
-    }
-
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (error) {
-      const name = error instanceof DOMException ? error.name : "";
-      const description =
-        name === "NotAllowedError" || name === "SecurityError"
-          ? "Microphone permission was denied. Enable it in your browser settings to use voice input."
-          : name === "NotFoundError"
-            ? "No microphone was found on this device."
-            : "Could not access the microphone.";
-      toastManager.add({ type: "error", title: "Microphone unavailable", description });
-      return;
-    }
-
-    const mimeType = pickSupportedMimeType();
-    let recorder: MediaRecorder;
-    try {
-      recorder = new MediaRecorder(stream, mimeType === undefined ? undefined : { mimeType });
-    } catch {
-      recorder = new MediaRecorder(stream);
-    }
-    streamRef.current = stream;
-    recorderRef.current = recorder;
-
-    const effectiveMime = recorder.mimeType || mimeType || "audio/webm";
-    await voiceRecordingController.beginCapture(effectiveMime);
-
-    recorder.addEventListener("dataavailable", (event) => {
-      if (event.data.size > 0) {
-        void voiceRecordingController.pushChunk(event.data);
+  const startRecorder = useCallback(
+    (stream: MediaStream, effectiveMime: string) => {
+      // Create a new MediaRecorder for this segment.
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(
+          stream,
+          effectiveMime === undefined ? undefined : { mimeType: effectiveMime }
+        );
+      } catch {
+        recorder = new MediaRecorder(stream);
       }
-    });
-    recorder.addEventListener(
-      "stop",
-      () => {
-        clearTimers();
-        const durationMs = Date.now() - startedAtRef.current;
-        teardownStream();
-        void voiceRecordingController.finishCapture(durationMs);
-      },
-      { once: true },
-    );
-    recorder.addEventListener(
-      "error",
-      () => {
-        clearTimers();
-        teardownStream();
+      recorderRef.current = recorder;
+      segmentStartedAtRef.current = Date.now();
+
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size > 0) {
+          void voiceRecordingController.pushChunk(event.data);
+        }
+      });
+
+      recorder.addEventListener(
+        "stop",
+        () => {
+          const segMs = Date.now() - segmentStartedAtRef.current;
+
+          // If this stop was triggered by a rollover request, start a new
+          // segment on the same stream. Only the max-length timeout is
+          // cleared — the elapsed interval keeps showing total time.
+          if (rolloverRequestedRef.current && streamRef.current?.active) {
+            rolloverRequestedRef.current = false;
+            if (maxTimeoutRef.current !== null) {
+              clearTimeout(maxTimeoutRef.current);
+              maxTimeoutRef.current = null;
+            }
+            void (async () => {
+              await voiceRecordingController.rolloverCapture(effectiveMime, segMs);
+              if (streamRef.current?.active) {
+                startRecorder(streamRef.current, effectiveMime);
+              }
+            })();
+            // Show notification that we're continuing to record.
+            toastManager.add({
+              type: "warning",
+              title: "Recording continues",
+              description: "Reached the maximum clip length — that part was sent for transcription.",
+            });
+          } else {
+            // Normal stop: teardown stream and finish capture.
+            clearTimers();
+            teardownStream();
+            void voiceRecordingController.finishCapture(segMs);
+          }
+        },
+        { once: true }
+      );
+
+      recorder.addEventListener(
+        "error",
+        () => {
+          clearTimers();
+          teardownStream();
+          toastManager.add({
+            type: "error",
+            title: "Recording error",
+            description: "Recording stopped unexpectedly.",
+          });
+        },
+        { once: true }
+      );
+
+      recorder.start(1000); // 1s timeslice
+      maxTimeoutRef.current = setTimeout(() => {
+        rolloverRequestedRef.current = true;
+        recorder.stop();
+      }, MAX_SEGMENT_MS);
+    },
+    [clearTimers, teardownStream]
+  );
+
+  const start = useCallback(
+    async () => {
+      if (options.disabled === true || recorderRef.current !== null) {
+        return;
+      }
+      if (typeof navigator === "undefined" || navigator.mediaDevices?.getUserMedia === undefined) {
         toastManager.add({
           type: "error",
-          title: "Recording error",
-          description: "Recording stopped unexpectedly.",
+          title: "Microphone unavailable",
+          description: "This browser does not support audio recording.",
         });
-      },
-      { once: true },
-    );
+        return;
+      }
 
-    startedAtRef.current = Date.now();
-    setElapsedMs(0);
-    // A timeslice makes MediaRecorder emit chunks periodically, so audio is
-    // persisted as it is captured rather than only at stop.
-    recorder.start(1000);
-    intervalRef.current = setInterval(() => {
-      setElapsedMs(Date.now() - startedAtRef.current);
-    }, 250);
-    maxTimeoutRef.current = setTimeout(() => {
-      stop();
-    }, MAX_RECORDING_MS);
-  }, [options.disabled, clearTimers, teardownStream, stop]);
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (error) {
+        const name = error instanceof DOMException ? error.name : "";
+        const description =
+          name === "NotAllowedError" || name === "SecurityError"
+            ? "Microphone permission was denied. Enable it in your browser settings to use voice input."
+            : name === "NotFoundError"
+              ? "No microphone was found on this device."
+              : "Could not access the microphone.";
+        toastManager.add({ type: "error", title: "Microphone unavailable", description });
+        return;
+      }
+
+      streamRef.current = stream;
+      const mimeType = pickSupportedMimeType();
+      const effectiveMime = mimeType || "audio/webm";
+
+      // Begin capture of the first segment.
+      await voiceRecordingController.beginCapture(effectiveMime);
+
+      // Set the overall timer (for UI display of total elapsed time across all segments).
+      startedAtRef.current = Date.now();
+      setElapsedMs(0);
+      intervalRef.current = setInterval(() => {
+        setElapsedMs(Date.now() - startedAtRef.current);
+      }, 250);
+
+      // Start the first recorder for this segment.
+      startRecorder(stream, effectiveMime);
+    },
+    [options.disabled, startRecorder]
+  );
 
   const retry = useCallback(() => {
     void voiceRecordingController.retry();

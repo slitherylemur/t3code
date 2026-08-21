@@ -1,28 +1,40 @@
 import type { TranscribeResult } from "./voiceRecordingTypes";
 
-// Same-origin raw route on the environment server (see apps/server/src/http.ts).
-// The served web app shares an origin with its server, so a cookie-authenticated
-// same-origin POST reaches the auth-guarded endpoint without exposing the key.
+// Same-origin transcription endpoint route path on the environment server
+// (see apps/server/src/http.ts). When paired to an environment server,
+// ComposerMicButton resolves this against the paired server's base URL.
+// When empty (dev / bundled), it resolves via the Vite base URL for
+// same-origin requests; hosted-static builds use the gateway's transcription
+// proxy, which transcribes with OpenAI gpt-4o-transcribe for high accuracy.
 const TRANSCRIPTION_PATH = "/api/transcription/audio";
 
-// The LateShift client is hosted cross-origin from the environment server it is
-// paired to, so the endpoint has to be resolved against the paired server base
-// URL rather than the page origin. ComposerMicButton keeps this in sync with the
-// active environment; an empty value falls back to same-origin (dev / bundled).
+// Base URL for cross-origin paired server transcription. An empty value falls
+// back to same-origin (dev / bundled / hosted-static via Vite base URL).
 let transcriptionBaseUrl = "";
 
 export function setTranscriptionBaseUrl(baseUrl: string | null): void {
   transcriptionBaseUrl = baseUrl?.trim() ?? "";
 }
 
+/**
+ * Resolve the transcription path under the Vite base URL. Guards against
+ * missing/empty BASE_URL and double slashes so a BASE_URL of "/" yields
+ * "/api/transcription/audio" and "/app/" yields "/app/api/transcription/audio".
+ */
+export function pageOriginTranscriptionPath(baseUrl: string | undefined): string {
+  const trimmed = baseUrl?.trim() || "/";
+  const normalized = trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+  return `${normalized}api/transcription/audio`.replace(/\/+/g, "/");
+}
+
 function transcriptionEndpoint(): string {
   if (!transcriptionBaseUrl) {
-    return TRANSCRIPTION_PATH;
+    return pageOriginTranscriptionPath(import.meta.env.BASE_URL);
   }
   try {
     return new URL(TRANSCRIPTION_PATH, transcriptionBaseUrl).toString();
   } catch {
-    return TRANSCRIPTION_PATH;
+    return pageOriginTranscriptionPath(import.meta.env.BASE_URL);
   }
 }
 

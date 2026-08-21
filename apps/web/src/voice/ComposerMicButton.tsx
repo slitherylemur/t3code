@@ -1,12 +1,14 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Loader2Icon, MicIcon, RotateCcwIcon, SquareIcon, XIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PointerEvent } from "react";
 
+import { cn } from "~/lib/utils";
 import { Button } from "../components/ui/button";
 import { toastManager } from "../components/ui/toast";
 import { readEnvironmentSupportsTranscription } from "../state/entities";
 import { useEnvironmentHttpBaseUrl } from "../state/environments";
+import { isHostedStaticApp } from "../hostedPairing";
 import { setTranscriptionBaseUrl } from "./transcriptionClient";
 import { useBrowserSpeechRecognition } from "./useBrowserSpeechRecognition";
 import { useVoiceRecording } from "./useVoiceRecording";
@@ -25,10 +27,11 @@ export interface ComposerMicButtonProps {
   readonly disabled?: boolean;
 }
 
-/** Uses server transcription when advertised, browser dictation for stock servers, and the hosting site's same-origin transcription proxy when the browser lacks SpeechRecognition (Firefox). */
+/** Uses server transcription when advertised, browser dictation for stock servers, and the hosting site's same-origin transcription proxy when the browser lacks SpeechRecognition (Firefox). Hosted-static builds always use the recorder + the hosting gateway's same-origin transcription proxy because it transcribes with OpenAI gpt-4o-transcribe, which is far more accurate than device dictation. */
 export function ComposerMicButton(props: ComposerMicButtonProps) {
   const focusTargetRef = useRef<HTMLElement | null>(null);
   const wasBrowserListeningRef = useRef(false);
+  const [flash, setFlash] = useState(false);
   const disabled = props.disabled ?? false;
   const serverSupported = readEnvironmentSupportsTranscription(props.environmentId);
   const httpBaseUrl = useEnvironmentHttpBaseUrl(props.environmentId);
@@ -42,7 +45,7 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
   // one. Browsers without SpeechRecognition (Firefox) fall back to recording
   // with MediaRecorder and transcribing via the same-origin proxy on the
   // hosting site (empty base URL = page origin).
-  const useServerRecorder = (serverSupported || !browserSpeech.isSupported) && voice.isSupported;
+  const useServerRecorder = (serverSupported || isHostedStaticApp() || !browserSpeech.isSupported) && voice.isSupported;
   setTranscriptionBaseUrl(serverSupported ? httpBaseUrl : "");
 
   const preserveComposerFocus = (event: PointerEvent) => {
@@ -59,6 +62,20 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
     }
     wasBrowserListeningRef.current = browserSpeech.isListening;
   }, [browserSpeech.isListening]);
+
+  const seenRolloverCountRef = useRef(0);
+  useEffect(() => {
+    if (voice.snapshot.phase !== "recording") {
+      seenRolloverCountRef.current = 0;
+      return;
+    }
+    if (voice.snapshot.rolloverCount > seenRolloverCountRef.current) {
+      seenRolloverCountRef.current = voice.snapshot.rolloverCount;
+      setFlash(true);
+      const timeout = setTimeout(() => setFlash(false), 1600);
+      return () => clearTimeout(timeout);
+    }
+  }, [voice.snapshot.rolloverCount, voice.snapshot.phase]);
 
   if (!useServerRecorder && !browserSpeech.isSupported) {
     return (
@@ -134,7 +151,10 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
   if (snapshot.phase === "recording") {
     return (
       <div
-        className="flex items-center gap-1.5 rounded-full border border-input bg-popover py-0.5 pr-0.5 pl-2"
+        className={cn(
+          "flex items-center gap-1.5 rounded-full border border-input bg-popover py-0.5 pr-0.5 pl-2",
+          flash && "ring-2 ring-amber-500"
+        )}
         data-chat-composer-voice="recording"
       >
         <span
@@ -144,6 +164,14 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
         <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">
           {formatElapsed(voice.elapsedMs)}
         </span>
+        {snapshot.queuedSegments > 0 && (
+          <div title="Transcribing earlier part…">
+            <Loader2Icon
+              className="size-3 animate-spin text-muted-foreground"
+              aria-hidden="true"
+            />
+          </div>
+        )}
         <Button
           size="icon-sm"
           variant="ghost"
@@ -160,6 +188,10 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
   }
 
   if (snapshot.phase === "transcribing") {
+    const label =
+      snapshot.queuedSegments > 1
+        ? `Transcribing ${snapshot.queuedSegments} parts…`
+        : "Transcribing recording";
     return (
       <Button
         size="icon-sm"
@@ -167,8 +199,8 @@ export function ComposerMicButton(props: ComposerMicButtonProps) {
         className="rounded-full"
         onPointerDown={(event) => event.preventDefault()}
         disabled
-        aria-label="Transcribing recording"
-        title="Transcribing…"
+        aria-label={label}
+        title={label}
         data-chat-composer-voice="transcribing"
       >
         <Loader2Icon className="size-4 animate-spin" />

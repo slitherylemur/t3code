@@ -3,6 +3,7 @@ import type {
   RecordingPersistence,
   RetryScheduler,
   TranscribeFn,
+  VoicePhase,
   VoiceRecordingSnapshot,
 } from "./voiceRecordingTypes";
 
@@ -41,19 +42,36 @@ const IDLE_SNAPSHOT: VoiceRecordingSnapshot = {
   recordingId: null,
   errorMessage: null,
   autoRetryScheduled: false,
+  queuedSegments: 0,
+  rolloverCount: 0,
 };
 
 /**
- * Owns the durable lifecycle of a single voice recording: chunk persistence,
- * transcription, and the retry/backoff state machine. Capture (MediaRecorder,
- * permissions, elapsed timer) lives in the hook, which drives this controller.
+ * Owns the durable lifecycle of segmented voice recordings: chunk persistence,
+ * FIFO transcription queue, and the retry/backoff state machine. Supports
+ * automatic rollover when a segment reaches max length, with sequential
+ * transcription and in-order transcript insertion.
+ *
+ * State machine:
+ * - captureId: the segment currently receiving chunks (null when not recording).
+ * - queue: FIFO of segment ids awaiting/being transcribed (head may be in-flight).
+ * - headFailed: true if the head segment failed transcription.
+ * - processing: true while transcribing the head segment.
+ * - rolloverCount: count of max-length rollovers in the current session.
+ *
+ * Phases derived from state:
+ * - "recording": captureId is not null (actively capturing); show elapsed timer.
+ * - "transcribing": captureId is null and queue is not empty (transcription in flight).
+ * - "failed": headFailed is true (head segment failed).
+ * - "idle": everything done and queue empty.
  *
  * Robustness guarantees:
  * - Every chunk is written to persistence as it arrives, so a crash/reload
  *   never loses audio.
- * - A failed transcription is auto-retried with exponential backoff up to
- *   `maxAutoRetries`, then held in `failed` for a one-click manual retry.
- * - The recording stays in persistence until it is transcribed or discarded,
+ * - Segments are transcribed sequentially in enqueue order; transcripts are
+ *   inserted in the correct order even if the first segment transcribes slowly.
+ * - A failed head segment pauses the queue; retry() or discard() continues it.
+ * - The queue persists until every segment is transcribed or discarded,
  *   and is recovered on the next launch via `hydrate()`.
  */
 export class VoiceRecordingController {
@@ -70,7 +88,11 @@ export class VoiceRecordingController {
   private snapshot: VoiceRecordingSnapshot = IDLE_SNAPSHOT;
   private readonly listeners = new Set<() => void>();
   private cancelScheduledRetry: (() => void) | null = null;
-  private activeId: string | null = null;
+  private captureId: string | null = null;
+  private queue: string[] = [];
+  private headFailed = false;
+  private processing = false;
+  private rolloverCount = 0;
 
   constructor(deps: VoiceRecordingControllerDeps) {
     this.persistence = deps.persistence;
@@ -93,56 +115,83 @@ export class VoiceRecordingController {
 
   getSnapshot = (): VoiceRecordingSnapshot => this.snapshot;
 
-  private setSnapshot(next: Partial<VoiceRecordingSnapshot>): void {
-    const merged: VoiceRecordingSnapshot = { ...this.snapshot, ...next };
+  private recomputeSnapshot(overrides?: Partial<VoiceRecordingSnapshot>): VoiceRecordingSnapshot {
+    // Derive phase from state machine.
+    const phase: VoicePhase = this.captureId
+      ? "recording"
+      : this.headFailed
+        ? "failed"
+        : this.queue.length > 0
+          ? "transcribing"
+          : "idle";
+
+    // Current active recording is the segment being captured, or the head if transcribing.
+    const recordingId = this.captureId ?? this.queue[0] ?? null;
+
+    // Error and retry flags come from the head segment's persisted state (updated by processQueue).
+    let errorMessage = this.snapshot.errorMessage;
+    let autoRetryScheduled = this.snapshot.autoRetryScheduled;
+
+    return {
+      phase,
+      recordingId,
+      errorMessage,
+      autoRetryScheduled,
+      queuedSegments: this.queue.length,
+      rolloverCount: this.rolloverCount,
+      ...overrides,
+    };
+  }
+
+  private setSnapshot(overrides?: Partial<VoiceRecordingSnapshot>): void {
+    const next = this.recomputeSnapshot(overrides);
     if (
-      merged.phase === this.snapshot.phase &&
-      merged.recordingId === this.snapshot.recordingId &&
-      merged.errorMessage === this.snapshot.errorMessage &&
-      merged.autoRetryScheduled === this.snapshot.autoRetryScheduled
+      next.phase === this.snapshot.phase &&
+      next.recordingId === this.snapshot.recordingId &&
+      next.errorMessage === this.snapshot.errorMessage &&
+      next.autoRetryScheduled === this.snapshot.autoRetryScheduled &&
+      next.queuedSegments === this.snapshot.queuedSegments &&
+      next.rolloverCount === this.snapshot.rolloverCount
     ) {
       return;
     }
-    this.snapshot = merged;
+    this.snapshot = next;
     for (const listener of this.listeners) {
       listener();
     }
   }
 
-  /** Recover a recording persisted by a previous session, if any. */
+  /** Recover any recordings persisted by a previous session. */
   async hydrate(): Promise<void> {
-    if (this.activeId !== null) {
+    if (this.captureId !== null || this.queue.length > 0) {
       return;
     }
-    const pending = await this.persistence.getPendingRecording().catch(() => null);
-    if (!pending) {
+    const pendings = await this.persistence.getPendingRecordings().catch(() => []);
+    if (pendings.length === 0) {
       return;
     }
-    // Any non-completed status means the previous attempt was interrupted; hold
-    // it as failed so the user can retry transcription or discard it.
-    this.activeId = pending.id;
-    if (pending.status !== "failed") {
-      await this.persistence
-        .updateRecording(pending.id, { status: "failed" })
-        .catch(() => undefined);
+    // Any non-completed status means the previous attempt was interrupted.
+    // Mark "recording"/"transcribing" statuses as "captured" (worth transcribing),
+    // enqueue them all, and surface as failed so the user can retry or discard.
+    for (const meta of pendings) {
+      if (meta.status === "recording" || meta.status === "transcribing") {
+        await this.persistence
+          .updateRecording(meta.id, { status: "captured" })
+          .catch(() => undefined);
+      }
+      this.queue.push(meta.id);
     }
+    this.headFailed = true;
     this.setSnapshot({
-      phase: "failed",
-      recordingId: pending.id,
       errorMessage:
-        pending.lastError ??
         "A previous recording was interrupted. Retry transcription or discard.",
       autoRetryScheduled: false,
     });
   }
 
-  /** Begin a new capture. Returns the new recording id. */
+  /** Begin a new capture segment. Returns the new recording id. */
   async beginCapture(mimeType: string): Promise<string> {
     this.clearScheduledRetry();
-    // Only one pending recording at a time: discard any previous one.
-    if (this.activeId !== null) {
-      await this.discardInternal(this.activeId);
-    }
     const id = this.generateId();
     const meta: PersistedRecordingMeta = {
       id,
@@ -155,19 +204,15 @@ export class VoiceRecordingController {
       lastError: null,
     };
     await this.persistence.createRecording(meta);
-    this.activeId = id;
-    this.setSnapshot({
-      phase: "recording",
-      recordingId: id,
-      errorMessage: null,
-      autoRetryScheduled: false,
-    });
+    this.captureId = id;
+    this.rolloverCount = 0;
+    this.setSnapshot();
     return id;
   }
 
   /** Persist a chunk as it arrives. Never throws. */
   async pushChunk(chunk: Blob): Promise<void> {
-    const id = this.activeId;
+    const id = this.captureId;
     if (id === null || chunk.size === 0) {
       return;
     }
@@ -179,41 +224,96 @@ export class VoiceRecordingController {
     }
   }
 
-  /** Finish capture and begin transcription. */
+  /** Finish capture of the current segment and enqueue for transcription. */
   async finishCapture(durationMs: number): Promise<void> {
-    const id = this.activeId;
+    const id = this.captureId;
     if (id === null) {
       return;
     }
     await this.persistence
       .updateRecording(id, { status: "captured", durationMs })
       .catch(() => undefined);
-    await this.runTranscription(id, { manual: false });
+    this.queue.push(id);
+    this.captureId = null;
+    this.setSnapshot();
+    void this.processQueue();
   }
 
-  /** Manual retry of the currently failed recording. */
+  /**
+   * Finish capture of the current segment and immediately start a new one,
+   * keeping the mic stream active. The old segment is enqueued for
+   * transcription (in the background), and the new one becomes the active
+   * captureId. Returns the new segment's id. Increments rolloverCount.
+   */
+  async rolloverCapture(mimeType: string, durationMs: number): Promise<string> {
+    const oldId = this.captureId;
+    if (oldId === null) {
+      return "";
+    }
+
+    // Finalize the old segment exactly like finishCapture.
+    await this.persistence
+      .updateRecording(oldId, { status: "captured", durationMs })
+      .catch(() => undefined);
+    this.queue.push(oldId);
+
+    // Create a new segment immediately.
+    const newId = this.generateId();
+    const meta: PersistedRecordingMeta = {
+      id: newId,
+      mimeType,
+      createdAt: this.now(),
+      status: "recording",
+      durationMs: 0,
+      sizeBytes: 0,
+      autoRetriesUsed: 0,
+      lastError: null,
+    };
+    await this.persistence.createRecording(meta);
+    this.captureId = newId;
+    this.rolloverCount += 1;
+    this.setSnapshot();
+
+    // Kick off transcription of queued segments in the background.
+    void this.processQueue();
+
+    return newId;
+  }
+
+  /** Manual retry of the currently failed head segment. */
   async retry(): Promise<void> {
-    const id = this.activeId;
-    if (id === null || this.snapshot.phase !== "failed") {
+    if (this.queue.length === 0 || !this.headFailed) {
       return;
     }
     this.clearScheduledRetry();
+    const headId = this.queue[0]!;
     // A manual retry resets the automatic-retry budget.
     await this.persistence
-      .updateRecording(id, { status: "captured", autoRetriesUsed: 0 })
+      .updateRecording(headId, { status: "captured", autoRetriesUsed: 0 })
       .catch(() => undefined);
-    await this.runTranscription(id, { manual: true });
+    this.headFailed = false;
+    this.setSnapshot();
+    void this.processQueue();
   }
 
-  /** Discard the current recording and return to idle. */
+  /**
+   * Discard the failed head segment and continue the queue.
+   * Only available in the failed phase (and only discards the head, not all queued).
+   */
   async discard(): Promise<void> {
-    const id = this.activeId;
-    this.clearScheduledRetry();
-    if (id !== null) {
-      await this.discardInternal(id);
+    if (this.queue.length === 0 || !this.headFailed) {
+      return;
     }
-    this.activeId = null;
-    this.setSnapshot(IDLE_SNAPSHOT);
+    this.clearScheduledRetry();
+    const headId = this.queue.shift()!;
+    await this.persistence.deleteRecording(headId).catch(() => undefined);
+    this.headFailed = false;
+    if (this.queue.length === 0 && this.captureId === null) {
+      this.setSnapshot();
+    } else {
+      this.setSnapshot();
+      void this.processQueue();
+    }
   }
 
   private async discardInternal(id: string): Promise<void> {
@@ -227,95 +327,124 @@ export class VoiceRecordingController {
     }
   }
 
-  private async runTranscription(id: string, options: { manual: boolean }): Promise<void> {
-    this.clearScheduledRetry();
-    const meta = await this.persistence.getRecording(id).catch(() => null);
-    if (!meta) {
-      // Recording vanished (discarded elsewhere); nothing to do.
-      if (this.activeId === id) {
-        this.activeId = null;
-        this.setSnapshot(IDLE_SNAPSHOT);
-      }
+  /**
+   * Process the FIFO transcription queue sequentially. If the head segment
+   * fails and is not being auto-retried, the queue pauses until the user
+   * retries or discards. Segments are transcribed and inserted in order.
+   */
+  private async processQueue(): Promise<void> {
+    if (this.processing || this.queue.length === 0) {
       return;
     }
-    const blob = await this.persistence.loadAudioBlob(id).catch(() => null);
-    if (!blob || blob.size === 0) {
-      await this.persistence
-        .updateRecording(id, { status: "failed", lastError: "The recording was empty." })
-        .catch(() => undefined);
-      this.setSnapshot({
-        phase: "failed",
-        recordingId: id,
-        errorMessage: "The recording was empty.",
-        autoRetryScheduled: false,
-      });
-      return;
-    }
+    this.processing = true;
 
-    await this.persistence.updateRecording(id, { status: "transcribing" }).catch(() => undefined);
-    this.setSnapshot({
-      phase: "transcribing",
-      recordingId: id,
-      errorMessage: null,
-      autoRetryScheduled: false,
-    });
-
-    let result: Awaited<ReturnType<TranscribeFn>>;
     try {
-      result = await this.transcribe(blob, meta.mimeType);
-    } catch (error) {
-      result = {
-        ok: false,
-        retryable: true,
-        message: error instanceof Error ? error.message : "Transcription failed.",
-      };
+      while (this.queue.length > 0 && !this.headFailed) {
+        const headId = this.queue[0]!;
+        const meta = await this.persistence.getRecording(headId).catch(() => null);
+        if (!meta) {
+          // Head vanished (discarded elsewhere); skip to next.
+          this.queue.shift();
+          continue;
+        }
+
+        const blob = await this.persistence.loadAudioBlob(headId).catch(() => null);
+        if (!blob || blob.size === 0) {
+          // Empty blob: non-retryable failure.
+          await this.persistence
+            .updateRecording(headId, {
+              status: "failed",
+              lastError: "The recording was empty.",
+            })
+            .catch(() => undefined);
+          this.headFailed = true;
+          this.setSnapshot({
+            errorMessage: "The recording was empty.",
+            autoRetryScheduled: false,
+          });
+          this.processing = false;
+          return;
+        }
+
+        await this.persistence
+          .updateRecording(headId, { status: "transcribing" })
+          .catch(() => undefined);
+        this.setSnapshot();
+
+        let result: Awaited<ReturnType<TranscribeFn>>;
+        try {
+          result = await this.transcribe(blob, meta.mimeType);
+        } catch (error) {
+          result = {
+            ok: false,
+            retryable: true,
+            message: error instanceof Error ? error.message : "Transcription failed.",
+          };
+        }
+
+        const updatedMeta = await this.persistence
+          .getRecording(headId)
+          .catch(() => null);
+        if (!updatedMeta) {
+          // Recording was discarded while in flight; skip to next.
+          this.queue.shift();
+          continue;
+        }
+
+        if (result.ok) {
+          // Success: insert transcript and continue to next.
+          this.onTranscript(result.text);
+          await this.discardInternal(headId);
+          this.queue.shift();
+          // Continue loop to process next segment.
+          continue;
+        }
+
+        // Failure: check if we can auto-retry.
+        const retriesUsed = updatedMeta.autoRetriesUsed;
+        const canAutoRetry =
+          result.retryable && retriesUsed < this.maxAutoRetries;
+        await this.persistence
+          .updateRecording(headId, {
+            status: "failed",
+            lastError: result.message,
+            autoRetriesUsed: canAutoRetry ? retriesUsed + 1 : retriesUsed,
+          })
+          .catch(() => undefined);
+
+        if (canAutoRetry) {
+          // Schedule retry and pause the queue.
+          this.headFailed = true;
+          const delay = this.backoffBaseMs * Math.pow(2, retriesUsed);
+          this.setSnapshot({
+            errorMessage: result.message,
+            autoRetryScheduled: true,
+          });
+          this.cancelScheduledRetry = this.scheduler.schedule(delay, () => {
+            this.cancelScheduledRetry = null;
+            // Reset headFailed so processQueue can retry the head segment.
+            this.headFailed = false;
+            this.setSnapshot({ autoRetryScheduled: false });
+            void this.processQueue();
+          });
+          this.processing = false;
+          return;
+        }
+
+        // Final failure: pause queue and surface the error.
+        this.headFailed = true;
+        this.onError(result.message);
+        this.setSnapshot({
+          errorMessage: result.message,
+          autoRetryScheduled: false,
+        });
+        this.processing = false;
+        return;
+      }
+    } finally {
+      this.processing = false;
     }
 
-    if (this.activeId !== id) {
-      // The recording was discarded/replaced while the request was in flight.
-      return;
-    }
-
-    if (result.ok) {
-      this.onTranscript(result.text);
-      await this.discardInternal(id);
-      this.activeId = null;
-      this.setSnapshot(IDLE_SNAPSHOT);
-      return;
-    }
-
-    const retriesUsed = meta.autoRetriesUsed;
-    const canAutoRetry = result.retryable && !options.manual && retriesUsed < this.maxAutoRetries;
-    await this.persistence
-      .updateRecording(id, {
-        status: "failed",
-        lastError: result.message,
-        autoRetriesUsed: canAutoRetry ? retriesUsed + 1 : retriesUsed,
-      })
-      .catch(() => undefined);
-
-    if (canAutoRetry) {
-      const delay = this.backoffBaseMs * Math.pow(2, retriesUsed);
-      this.setSnapshot({
-        phase: "failed",
-        recordingId: id,
-        errorMessage: result.message,
-        autoRetryScheduled: true,
-      });
-      this.cancelScheduledRetry = this.scheduler.schedule(delay, () => {
-        this.cancelScheduledRetry = null;
-        void this.runTranscription(id, { manual: false });
-      });
-      return;
-    }
-
-    // Out of automatic retries (or a non-retryable error): hold for manual retry.
-    this.onError(result.message);
-    this.setSnapshot({
-      phase: "failed",
-      recordingId: id,
-      errorMessage: result.message,
-      autoRetryScheduled: false,
-    });
+    this.setSnapshot();
   }
 }

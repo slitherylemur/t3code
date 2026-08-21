@@ -38,9 +38,9 @@ class InMemoryPersistence implements RecordingPersistence {
     const meta = this.metas.get(id);
     return meta ? { ...meta } : null;
   }
-  async getPendingRecording(): Promise<PersistedRecordingMeta | null> {
-    const all = [...this.metas.values()].sort((a, b) => b.createdAt - a.createdAt);
-    return all.length > 0 ? { ...all[0]! } : null;
+  async getPendingRecordings(): Promise<PersistedRecordingMeta[]> {
+    const all = [...this.metas.values()].sort((a, b) => a.createdAt - b.createdAt);
+    return all.map((meta) => ({ ...meta }));
   }
   async loadAudioBlob(id: string): Promise<Blob | null> {
     const list = this.chunks.get(id);
@@ -81,20 +81,23 @@ function flushPromises(): Promise<void> {
 function makeController(options: {
   persistence?: InMemoryPersistence;
   scheduler?: FakeScheduler;
-  outcomes: TranscribeResult[];
+  outcomes?: TranscribeResult[];
+  transcribe?: (blob: Blob, mimeType: string) => Promise<TranscribeResult>;
   onTranscript?: (text: string) => void;
   onError?: (message: string) => void;
 }) {
   const persistence = options.persistence ?? new InMemoryPersistence();
   const scheduler = options.scheduler ?? new FakeScheduler();
-  const outcomes = [...options.outcomes];
-  const transcribe = vi.fn(async (): Promise<TranscribeResult> => {
-    const next = outcomes.shift();
-    if (!next) {
-      throw new Error("no more outcomes");
-    }
-    return next;
-  });
+  const outcomes = options.outcomes ? [...options.outcomes] : [];
+  const transcribe =
+    options.transcribe ||
+    vi.fn(async (): Promise<TranscribeResult> => {
+      const next = outcomes.shift();
+      if (!next) {
+        throw new Error("no more outcomes");
+      }
+      return next;
+    });
   let counter = 0;
   const controller = new VoiceRecordingController({
     persistence,
@@ -254,11 +257,218 @@ describe("VoiceRecordingController", () => {
     await controller.hydrate();
     expect(controller.getSnapshot().phase).toBe("failed");
     expect(controller.getSnapshot().recordingId).toBe("rec-prev");
-    expect(persistence.metas.get("rec-prev")?.status).toBe("failed");
+    // hydrate marks "recording" status as "captured" (worth transcribing)
+    expect(persistence.metas.get("rec-prev")?.status).toBe("captured");
 
     await controller.retry();
     await flushPromises();
     expect(onTranscript).toHaveBeenCalledWith("recovered");
+    expect(controller.getSnapshot().phase).toBe("idle");
+  });
+
+  it("rollover: finalize segment, enqueue, and start new capture", async () => {
+    const onTranscript = vi.fn();
+    const { controller, persistence, transcribe } = makeController({
+      outcomes: [{ ok: true, text: "seg-1" }, { ok: true, text: "seg-2" }],
+      onTranscript,
+    });
+    const seg1Id = await controller.beginCapture("audio/webm");
+    await controller.pushChunk(new Blob(["chunk-a"]));
+
+    // Simulate rollover at max length: finalize seg 1 and create seg 2 while still recording
+    const seg2Id = await controller.rolloverCapture("audio/webm", 4200);
+    expect(seg2Id).not.toBe(seg1Id);
+    expect(controller.getSnapshot().phase).toBe("recording"); // Still recording seg 2
+    expect(controller.getSnapshot().queuedSegments).toBe(1);
+    expect(controller.getSnapshot().rolloverCount).toBe(1);
+
+    // Finish seg 2
+    await controller.pushChunk(new Blob(["chunk-b"]));
+    await controller.finishCapture(2200);
+    await flushPromises();
+
+    // Both should be transcribed in order
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(onTranscript).toHaveBeenCalledTimes(2);
+    expect(onTranscript).toHaveBeenNthCalledWith(1, "seg-1");
+    expect(onTranscript).toHaveBeenNthCalledWith(2, "seg-2");
+    expect(controller.getSnapshot().phase).toBe("idle");
+    expect(persistence.metas.size).toBe(0);
+  });
+
+  it("ordering: slow first segment, transcripts inserted sequentially", async () => {
+    const onTranscript = vi.fn();
+
+    // Controlled promises to delay seg-1's transcription
+    let resolveTranscribe1: ((value: TranscribeResult) => void) | null = null;
+    const transcribe1Promise = new Promise<TranscribeResult>((resolve) => {
+      resolveTranscribe1 = resolve;
+    });
+
+    let callCount = 0;
+    const transcribeImpl = vi.fn(async (): Promise<TranscribeResult> => {
+      callCount += 1;
+      if (callCount === 1) {
+        return transcribe1Promise;
+      }
+      return { ok: true, text: "seg-2" };
+    });
+
+    const { controller, persistence } = makeController({
+      transcribe: transcribeImpl,
+      onTranscript,
+    });
+
+    // Begin capture and rollover before resolving seg-1's transcription
+    const seg1Id = await controller.beginCapture("audio/webm");
+    await controller.pushChunk(new Blob(["chunk-1"]));
+
+    // Rollover: enqueue seg-1, start seg-2 (seg-1 transcription is still pending)
+    const seg2Id = await controller.rolloverCapture("audio/webm", 1000);
+    await controller.pushChunk(new Blob(["chunk-2"]));
+    await controller.finishCapture(1500);
+
+    // Now resolve seg-1, which should finish its transcription and move to seg-2
+    resolveTranscribe1!({ ok: true, text: "seg-1" });
+    await flushPromises();
+
+    // Transcripts must be in order even though seg-1 finished transcribing last
+    expect(onTranscript).toHaveBeenCalledTimes(2);
+    expect(onTranscript).toHaveBeenNthCalledWith(1, "seg-1");
+    expect(onTranscript).toHaveBeenNthCalledWith(2, "seg-2");
+    expect(controller.getSnapshot().phase).toBe("idle");
+  });
+
+  it("failed middle segment pauses queue until retry/discard", async () => {
+    const onTranscript = vi.fn();
+    const onError = vi.fn();
+    const { controller, persistence } = makeController({
+      outcomes: [
+        { ok: true, text: "seg-1" },
+        { ok: false, retryable: false, message: "seg-2 failed" },
+        { ok: true, text: "seg-2" }, // retry of seg-2 succeeds
+        { ok: true, text: "seg-3" },
+      ],
+      onTranscript,
+      onError,
+    });
+
+    // Capture 3 segments using rollover
+    const seg1Id = await controller.beginCapture("audio/webm");
+    await controller.pushChunk(new Blob(["chunk-1"]));
+
+    const seg2Id = await controller.rolloverCapture("audio/webm", 1000);
+    await controller.pushChunk(new Blob(["chunk-2"]));
+
+    const seg3Id = await controller.rolloverCapture("audio/webm", 1000);
+    await controller.pushChunk(new Blob(["chunk-3"]));
+    await controller.finishCapture(1000);
+
+    await flushPromises();
+
+    // Seg 1 succeeds, seg 2 fails and pauses the queue
+    expect(onTranscript).toHaveBeenCalledOnce();
+    expect(onTranscript).toHaveBeenCalledWith("seg-1");
+    expect(onError).toHaveBeenCalledWith("seg-2 failed");
+    expect(controller.getSnapshot().phase).toBe("failed");
+    expect(controller.getSnapshot().queuedSegments).toBe(2); // seg 2 and seg 3 waiting
+
+    // Retry succeeds, which processes both seg 2 and seg 3
+    await controller.retry();
+    await flushPromises();
+    expect(onTranscript).toHaveBeenCalledTimes(3);
+    expect(onTranscript).toHaveBeenNthCalledWith(2, "seg-2");
+    expect(onTranscript).toHaveBeenNthCalledWith(3, "seg-3");
+    expect(controller.getSnapshot().phase).toBe("idle");
+  });
+
+  it("discard of failed head resumes the rest", async () => {
+    const onTranscript = vi.fn();
+    const onError = vi.fn();
+    const { controller, persistence } = makeController({
+      outcomes: [
+        { ok: true, text: "seg-1" },
+        { ok: false, retryable: false, message: "seg-2 failed" },
+        { ok: true, text: "seg-3" }, // seg-3 processed after seg-2 is discarded
+      ],
+      onTranscript,
+      onError,
+    });
+
+    // Capture 3 segments using rollover
+    await controller.beginCapture("audio/webm");
+    await controller.pushChunk(new Blob(["chunk-1"]));
+
+    await controller.rolloverCapture("audio/webm", 1000);
+    await controller.pushChunk(new Blob(["chunk-2"]));
+
+    await controller.rolloverCapture("audio/webm", 1000);
+    await controller.pushChunk(new Blob(["chunk-3"]));
+    await controller.finishCapture(1000);
+
+    await flushPromises();
+
+    // Seg 1 succeeds, seg 2 fails
+    expect(onTranscript).toHaveBeenCalledWith("seg-1");
+    expect(onError).toHaveBeenCalledWith("seg-2 failed");
+    expect(controller.getSnapshot().phase).toBe("failed");
+    expect(controller.getSnapshot().queuedSegments).toBe(2); // seg 2 and seg 3
+
+    // Discard the failed seg 2, which allows seg 3 to continue
+    await controller.discard();
+    await flushPromises();
+    expect(onTranscript).toHaveBeenCalledTimes(2);
+    expect(onTranscript).toHaveBeenNthCalledWith(2, "seg-3");
+    expect(controller.getSnapshot().phase).toBe("idle");
+    expect(persistence.metas.size).toBe(0);
+  });
+
+  it("hydrate with two persisted recordings", async () => {
+    const persistence = new InMemoryPersistence();
+    await persistence.createRecording({
+      id: "rec-1",
+      mimeType: "audio/webm",
+      createdAt: 100,
+      status: "recording",
+      durationMs: 1000,
+      sizeBytes: 10,
+      autoRetriesUsed: 0,
+      lastError: null,
+    });
+    await persistence.appendChunk("rec-1", new Blob(["audio-1"]));
+
+    await persistence.createRecording({
+      id: "rec-2",
+      mimeType: "audio/webm",
+      createdAt: 200,
+      status: "transcribing",
+      durationMs: 1500,
+      sizeBytes: 15,
+      autoRetriesUsed: 0,
+      lastError: null,
+    });
+    await persistence.appendChunk("rec-2", new Blob(["audio-2"]));
+
+    const onTranscript = vi.fn();
+    const { controller } = makeController({
+      persistence,
+      outcomes: [{ ok: true, text: "transcript-1" }, { ok: true, text: "transcript-2" }],
+      onTranscript,
+    });
+
+    await controller.hydrate();
+    expect(controller.getSnapshot().phase).toBe("failed");
+    expect(controller.getSnapshot().queuedSegments).toBe(2);
+    expect(persistence.metas.get("rec-1")?.status).toBe("captured");
+    expect(persistence.metas.get("rec-2")?.status).toBe("captured");
+
+    await controller.retry();
+    await flushPromises();
+
+    // Both transcribed in createdAt order
+    expect(onTranscript).toHaveBeenCalledTimes(2);
+    expect(onTranscript).toHaveBeenNthCalledWith(1, "transcript-1");
+    expect(onTranscript).toHaveBeenNthCalledWith(2, "transcript-2");
     expect(controller.getSnapshot().phase).toBe("idle");
   });
 });

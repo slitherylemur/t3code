@@ -31,8 +31,8 @@ export interface RecordingPersistence {
     patch: Partial<Omit<PersistedRecordingMeta, "id" | "createdAt" | "mimeType">>,
   ): Promise<void>;
   getRecording(id: string): Promise<PersistedRecordingMeta | null>;
-  /** The most recent recording that is not yet completed, if any. */
-  getPendingRecording(): Promise<PersistedRecordingMeta | null>;
+  /** All persisted recordings that are not yet completed, sorted by createdAt ascending. */
+  getPendingRecordings(): Promise<PersistedRecordingMeta[]>;
   /** Assemble the persisted chunks into a single blob, or null if none. */
   loadAudioBlob(id: string): Promise<Blob | null>;
   deleteRecording(id: string): Promise<void>;
@@ -58,4 +58,8 @@ export interface VoiceRecordingSnapshot {
   readonly errorMessage: string | null;
   /** True while an automatic retry is scheduled (before the manual fallback). */
   readonly autoRetryScheduled: boolean;
+  /** Segments finished capturing but not yet successfully transcribed. */
+  readonly queuedSegments: number;
+  /** How many max-length rollovers have happened in the current recording session. */
+  readonly rolloverCount: number;
 }

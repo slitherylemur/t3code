@@ -41,16 +41,40 @@ function IndexDraftLanding() {
   const threads = useThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
+  const { environments } = useEnvironments();
   const startingRef = useRef(false);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
 
-  const mostRecentProject = useMemo(
-    () =>
-      bootstrapped
-        ? (sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null)
-        : null,
-    [bootstrapped, projects, threads],
-  );
+  // A wrapping shell (e.g. the LateShift tablet app's tabs) can scope the
+  // landing draft to one environment with ?environment=<environmentId|label>;
+  // the draft then opens in that environment's most recent project instead of
+  // the most recent project across all environments.
+  const requestedEnvironmentId = useMemo(() => {
+    const requested = new URLSearchParams(window.location.search).get("environment");
+    if (!requested) {
+      return null;
+    }
+    const match = environments.find(
+      (environment) =>
+        environment.environmentId === requested ||
+        environment.label.toLowerCase() === requested.toLowerCase(),
+    );
+    return match?.environmentId ?? null;
+  }, [environments]);
+
+  const mostRecentProject = useMemo(() => {
+    if (!bootstrapped) {
+      return null;
+    }
+    if (requestedEnvironmentId !== null) {
+      const scoped = projects.filter((project) => project.environmentId === requestedEnvironmentId);
+      const match = sortScopedProjectsForSidebar(scoped, threads, "updated_at")[0];
+      if (match) {
+        return match;
+      }
+    }
+    return sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null;
+  }, [bootstrapped, projects, threads, requestedEnvironmentId]);
 
   useEffect(() => {
     if (mostRecentProject === null || startingRef.current) {

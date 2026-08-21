@@ -24,6 +24,18 @@ export type RemoteEnvironmentAuthError = RemoteEnvironmentRequestError;
 
 const DEFAULT_REMOTE_REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * Appends the "/ws" websocket path to a base URL, joining onto a non-root
+ * base path instead of overwriting it (e.g. "/app/env/personal" -> "/app/env/personal/ws").
+ * A root or empty pathname resolves to "/ws", unchanged from prior behavior.
+ */
+const withWebSocketPath = (url: URL): URL => {
+  const basePath =
+    url.pathname === "" || url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/ws`;
+  return url;
+};
+
 const clientMetadataTokenExchangeFields = (
   clientMetadata: AuthClientPresentationMetadata | undefined,
 ) => ({
@@ -182,10 +194,7 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });
 
-  const url = new URL(input.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
-  }
+  const url = withWebSocketPath(new URL(input.wsBaseUrl));
   url.searchParams.set("wsTicket", issued.ticket);
   return url.toString();
 });
@@ -205,10 +214,7 @@ export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(
     dpopProof: input.dpopProof,
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });
-  const url = new URL(input.wsBaseUrl);
-  if (url.pathname === "" || url.pathname === "/") {
-    url.pathname = "/ws";
-  }
+  const url = withWebSocketPath(new URL(input.wsBaseUrl));
   url.searchParams.set("wsTicket", issued.ticket);
   return url.toString();
 });

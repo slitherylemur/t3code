@@ -35,12 +35,12 @@ import * as Semaphore from "effect/Semaphore";
 
 const DATABASE_NAME = "t3code:connection-runtime";
 const DATABASE_VERSION = 4;
-const CATALOG_STORE_NAME = "catalog";
+export const CATALOG_STORE_NAME = "catalog";
 const SHELL_STORE_NAME = "shell";
 const THREAD_STORE_NAME = "thread";
 const SERVER_CONFIG_STORE_NAME = "server-config";
 const VCS_REFS_STORE_NAME = "vcs-refs";
-const CATALOG_KEY = "document";
+export const CATALOG_KEY = "document";
 const SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION = 1;
 
 const StoredShellSnapshot = Schema.Struct({
@@ -116,7 +116,11 @@ function persistenceError(
   });
 }
 
-const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* () {
+// Exported so other bootstrap paths (see provisionBootstrap.ts) that need to
+// read/write the "catalog" object store can reuse this single open+upgrade
+// definition instead of hand-rolling a second one that could drift out of
+// sync on DB name/version/store creation.
+export const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* () {
   return yield* Effect.callback<IDBDatabase, ConnectionTransientError>((resume) => {
     if (typeof indexedDB === "undefined") {
       resume(
@@ -151,7 +155,7 @@ const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* (
   });
 });
 
-function readDatabaseValue(database: IDBDatabase, storeName: string, key: IDBValidKey) {
+export function readDatabaseValue(database: IDBDatabase, storeName: string, key: IDBValidKey) {
   return Effect.callback<unknown, ConnectionTransientError>((resume) => {
     const request = database.transaction(storeName, "readonly").objectStore(storeName).get(key);
     request.addEventListener("error", () => {
@@ -163,7 +167,7 @@ function readDatabaseValue(database: IDBDatabase, storeName: string, key: IDBVal
   }).pipe(Effect.withSpan("web.connectionStorage.readDatabaseValue"));
 }
 
-function writeDatabaseValue(
+export function writeDatabaseValue(
   database: IDBDatabase,
   storeName: string,
   key: IDBValidKey,

@@ -72,6 +72,18 @@ export type RemotePairingTargetError = typeof RemotePairingTargetError.Type;
 const hasSupportedRemoteBackendProtocol = (url: URL): boolean =>
   SUPPORTED_REMOTE_BACKEND_PROTOCOLS.has(url.protocol);
 
+/**
+ * Normalizes a URL pathname for use as a remote base path: the root path
+ * stays "/", and any other path has its trailing slash stripped so that
+ * "/app/env/personal/" and "/app/env/personal" are treated identically.
+ */
+const normalizeRemoteBasePathname = (pathname: string): string => {
+  if (pathname === "" || pathname === "/") {
+    return "/";
+  }
+  return pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+};
+
 const normalizeRemoteBaseUrl = (
   rawValue: string,
   source: RemoteBackendUrlInvalidError["source"],
@@ -97,7 +109,7 @@ const normalizeRemoteBaseUrl = (
       protocol: url.protocol,
     });
   }
-  url.pathname = "/";
+  url.pathname = normalizeRemoteBasePathname(url.pathname);
   url.search = "";
   url.hash = "";
   return url;
@@ -110,7 +122,7 @@ const toHttpBaseUrl = (url: URL): string => {
   } else if (next.protocol === "wss:") {
     next.protocol = "https:";
   }
-  next.pathname = "/";
+  next.pathname = normalizeRemoteBasePathname(next.pathname);
   next.search = "";
   next.hash = "";
   return next.toString();
@@ -123,7 +135,7 @@ const toWsBaseUrl = (url: URL): string => {
   } else if (next.protocol === "https:") {
     next.protocol = "wss:";
   }
-  next.pathname = "/";
+  next.pathname = normalizeRemoteBasePathname(next.pathname);
   next.search = "";
   next.hash = "";
   return next.toString();
@@ -220,10 +232,17 @@ export const resolveRemotePairingTarget = (input: {
     if (!credential) {
       throw new RemotePairingTokenMissingError({ host: url.host });
     }
+    // A direct pairing URL's own path (e.g. "/pair", see
+    // resolveDesktopPairingUrl) is the client-side pairing page route on
+    // that origin, not a meaningful backend base path -- unlike the "host"
+    // inputs above, it must still collapse to root here so QR/link pairing
+    // to a directly-reachable backend keeps working unchanged.
+    const backendUrl = new URL(url.toString());
+    backendUrl.pathname = "/";
     return {
       credential,
-      httpBaseUrl: toHttpBaseUrl(url),
-      wsBaseUrl: toWsBaseUrl(url),
+      httpBaseUrl: toHttpBaseUrl(backendUrl),
+      wsBaseUrl: toWsBaseUrl(backendUrl),
     };
   }
 

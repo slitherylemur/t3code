@@ -472,4 +472,49 @@ describe("remote environment authorization", () => {
       expect(url).toBe("wss://remote.example.com/ws?wsTicket=ws-ticket");
     }),
   );
+
+  it.effect("joins the rpc route onto a reverse-proxy path prefix instead of dropping it", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(
+        Response.json(
+          {
+            access_token: "bearer-token",
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: "orchestration:read",
+          },
+          { status: 200 },
+        ),
+        Response.json(
+          {
+            ticket: "ws-ticket",
+            expiresAt: "2026-05-01T12:05:00.000Z",
+          },
+          { status: 200 },
+        ),
+      );
+
+      yield* bootstrapRemoteBearerSession({
+        httpBaseUrl: "https://gateway.example.com/app/env/personal",
+        credential: "pairing-token",
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+
+      const url = yield* resolveRemoteWebSocketConnectionUrl({
+        wsBaseUrl: "wss://gateway.example.com/app/env/personal",
+        httpBaseUrl: "https://gateway.example.com/app/env/personal",
+        bearerToken: "bearer-token",
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+
+      expectFetchCall(fetch.calls, 1, {
+        url: "https://gateway.example.com/app/env/personal/oauth/token",
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=pairing-token&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token",
+      });
+      expect(url).toBe("wss://gateway.example.com/app/env/personal/ws?wsTicket=ws-ticket");
+    }),
+  );
 });

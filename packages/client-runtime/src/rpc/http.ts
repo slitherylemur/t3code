@@ -88,7 +88,14 @@ export const remoteHttpClientLayer = (
 
 const remoteApiBaseUrl = (httpBaseUrl: string): string => {
   const url = new URL(httpBaseUrl);
-  url.pathname = "/";
+  // Preserve a non-root base path (e.g. a reverse-proxy prefix like
+  // "/app/env/personal") instead of collapsing it to "/": HttpApiClient
+  // joins this baseUrl with each route's leading-slash path via a plain
+  // string join (effect's HttpClientRequest.prependUrl -> joinSegments),
+  // so an overwritten "/" here would silently drop the prefix from every
+  // real request even though it only shows up in error-message URLs
+  // elsewhere.
+  url.pathname = url.pathname === "/" ? "/" : url.pathname.replace(/\/+$/, "");
   url.search = "";
   url.hash = "";
   return url.toString();

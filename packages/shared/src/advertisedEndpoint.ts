@@ -33,7 +33,12 @@ export function normalizeHttpBaseUrl(rawValue: string): string {
     throw new Error(`Endpoint must use HTTP or HTTPS. Received ${url.protocol}`);
   }
 
-  url.pathname = "/";
+  // Preserve a non-root path (e.g. a reverse-proxy prefix like
+  // "/app/env/personal") instead of collapsing it to "/", so manually
+  // entering a path-prefixed environment URL (see connection/onboarding.ts)
+  // keeps working. Root stays "/"; any other path has its trailing slash
+  // stripped for a stable, comparable form.
+  url.pathname = url.pathname === "/" ? "/" : url.pathname.replace(/\/+$/, "");
   url.search = "";
   url.hash = "";
   return url.toString();

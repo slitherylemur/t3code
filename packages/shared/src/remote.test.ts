@@ -200,6 +200,57 @@ describe("remote", () => {
     );
   });
 
+  it("preserves a non-root path prefix from a direct host (reverse-proxy scenario)", () => {
+    expect(
+      resolveRemotePairingTarget({
+        host: "https://gateway.example.com/app/env/personal",
+        pairingCode: "pairing-token",
+      }),
+    ).toEqual({
+      credential: "pairing-token",
+      httpBaseUrl: "https://gateway.example.com/app/env/personal",
+      wsBaseUrl: "wss://gateway.example.com/app/env/personal",
+    });
+  });
+
+  it("strips a trailing slash from a non-root path prefix", () => {
+    expect(
+      resolveRemotePairingTarget({
+        host: "https://gateway.example.com/app/env/personal/",
+        pairingCode: "pairing-token",
+      }),
+    ).toEqual({
+      credential: "pairing-token",
+      httpBaseUrl: "https://gateway.example.com/app/env/personal",
+      wsBaseUrl: "wss://gateway.example.com/app/env/personal",
+    });
+  });
+
+  it("preserves a non-root path prefix from a hosted pairing link's host param", () => {
+    expect(
+      resolveRemotePairingTarget({
+        pairingUrl:
+          "https://app.t3.codes/pair?host=https%3A%2F%2Fgateway.example.com%2Fapp%2Fenv%2Fpersonal#token=pairing-token",
+      }),
+    ).toEqual({
+      credential: "pairing-token",
+      httpBaseUrl: "https://gateway.example.com/app/env/personal",
+      wsBaseUrl: "wss://gateway.example.com/app/env/personal",
+    });
+  });
+
+  it("still collapses a direct pairing url's own page route to root (not a backend prefix)", () => {
+    expect(
+      resolveRemotePairingTarget({
+        pairingUrl: "https://gateway.example.com/app/env/personal/pair#token=pairing-token",
+      }),
+    ).toEqual({
+      credential: "pairing-token",
+      httpBaseUrl: "https://gateway.example.com/",
+      wsBaseUrl: "wss://gateway.example.com/",
+    });
+  });
+
   it("preserves URL parsing causes with their input source", () => {
     let pairingUrlError: unknown;
     try {

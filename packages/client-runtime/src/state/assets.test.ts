@@ -8,7 +8,32 @@ import {
   createAssetEnvironmentAtoms,
   InvalidAssetCollectionKeyError,
   parseAssetCollectionKey,
+  resolveAssetUrl,
 } from "./assets.ts";
+
+describe("resolveAssetUrl", () => {
+  it("resolves a root-relative asset path against a root base url", () => {
+    expect(resolveAssetUrl("https://remote.example.com/", "/api/assets/token/file.png")).toBe(
+      "https://remote.example.com/api/assets/token/file.png",
+    );
+  });
+
+  it("joins a root-relative asset path onto a reverse-proxy path prefix instead of dropping it", () => {
+    expect(
+      resolveAssetUrl("https://gateway.example.com/app/env/personal", "/api/assets/token/file.png"),
+    ).toBe("https://gateway.example.com/app/env/personal/api/assets/token/file.png");
+  });
+
+  it("still resolves a genuinely relative reference against the base url", () => {
+    expect(resolveAssetUrl("https://gateway.example.com/app/env/personal/", "file.png")).toBe(
+      "https://gateway.example.com/app/env/personal/file.png",
+    );
+  });
+
+  it("returns null for an unparsable base url", () => {
+    expect(resolveAssetUrl("not a url", "/api/assets/token/file.png")).toBeNull();
+  });
+});
 
 describe("asset collection keys", () => {
   it("preserves malformed JSON and its native cause", () => {

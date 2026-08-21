@@ -13,6 +13,7 @@ import "./index.css";
 import { isElectron } from "./env";
 import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
+import { bootstrapProvisionedEnvironments } from "./provisionBootstrap";
 import { getRouter } from "./router";
 import {
   syncDocumentElectronPlatformClasses,
@@ -39,20 +40,30 @@ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string
 
 const app = <AppRoot router={router} />;
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    {clerkPublishableKey && hasCloudPublicConfig() ? (
-      isElectron ? (
-        <ElectronClerkProvider publishableKey={clerkPublishableKey} passkeys={passkeys}>
-          <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
-        </ElectronClerkProvider>
+function renderApp(): void {
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      {clerkPublishableKey && hasCloudPublicConfig() ? (
+        isElectron ? (
+          <ElectronClerkProvider publishableKey={clerkPublishableKey} passkeys={passkeys}>
+            <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
+          </ElectronClerkProvider>
+        ) : (
+          <ClerkProvider publishableKey={clerkPublishableKey}>
+            <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
+          </ClerkProvider>
+        )
       ) : (
-        <ClerkProvider publishableKey={clerkPublishableKey}>
-          <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
-        </ClerkProvider>
-      )
-    ) : (
-      app
-    )}
-  </React.StrictMode>,
-);
+        app
+      )}
+    </React.StrictMode>,
+  );
+}
+
+// bootstrapProvisionedEnvironments() is a no-op unless explicitly enabled
+// (VITE_PROVISION_BOOTSTRAP=1) and never throws -- it swallows its own
+// failures -- but it's still awaited through a catch here so a bootstrap
+// bug can never block the app from rendering.
+void bootstrapProvisionedEnvironments()
+  .catch(() => undefined)
+  .then(renderApp);

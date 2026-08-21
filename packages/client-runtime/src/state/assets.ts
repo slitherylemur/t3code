@@ -37,7 +37,18 @@ export function parseAssetCollectionKey(
 
 export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
+    const base = new URL(httpBaseUrl);
+    if (relativeUrl.startsWith("/")) {
+      // Server-issued asset paths are root-relative (e.g. "/api/assets/...").
+      // WHATWG URL resolution replaces the entire base pathname for a
+      // root-relative reference, which would silently drop a reverse-proxy
+      // prefix like "/app/env/personal" from httpBaseUrl. Join onto the
+      // base path instead so prefixed environments still work; a root base
+      // path resolves identically to the previous behavior.
+      const basePath = base.pathname === "/" ? "" : base.pathname.replace(/\/+$/, "");
+      return new URL(basePath + relativeUrl, base).toString();
+    }
+    return new URL(relativeUrl, base).toString();
   } catch {
     return null;
   }

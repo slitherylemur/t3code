@@ -172,6 +172,7 @@ function DocumentTitleSync() {
 function HostedStaticEnvironmentBootstrap() {
   const { environments } = useEnvironments();
   const activeEnvironmentId = useActiveEnvironmentId();
+  const appliedRequestedEnvironment = useRef(false);
 
   useEffect(() => {
     if (
@@ -180,6 +181,25 @@ function HostedStaticEnvironmentBootstrap() {
       )
     ) {
       return;
+    }
+
+    // A wrapping shell (e.g. the LateShift tablet app's tabs) can pin the
+    // active environment with ?environment=<environmentId|label>. Applied
+    // once per page load, first time the catalog is available.
+    if (!appliedRequestedEnvironment.current && environments.length > 0) {
+      const requested = new URLSearchParams(window.location.search).get("environment");
+      if (requested) {
+        appliedRequestedEnvironment.current = true;
+        const match = environments.find(
+          (environment) =>
+            environment.environmentId === requested ||
+            environment.label.toLowerCase() === requested.toLowerCase(),
+        );
+        if (match) {
+          setActiveEnvironmentId(match.environmentId);
+          return;
+        }
+      }
     }
 
     if (activeEnvironmentId) {
